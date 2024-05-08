@@ -1,0 +1,263 @@
+---
+title: "EcommerceAnalysis"
+author: "Alex Friedrichsen"
+date: "2024-05-03"
+output: html_document
+---
+
+```{r first time setup}
+# First time setup for coding environment
+#install.packages("renv")
+#renv::init()
+#renv::activate()
+
+# install.packages("markdown")
+# install.packages("knitr")
+# install.packages("tidyverse")
+# install.packages("openxlsx")
+# install.packages("skimr")
+
+```
+
+```{r formatting rmd file}
+library(knitr)
+library(tidyverse)
+library(openxlsx)
+library(markdown)
+library(skimr)
+
+knitr::opts_chunk$set(echo = TRUE)
+
+
+
+#next steps for project: 
+# - does using renv require special package install, update lockfile manually?
+# - start looking at the data files manually
+# - do some normal processing and cleaning
+# - use the XLSX file package to create two worksheets in one workbook with correct tables
+
+```
+
+
+```{r setup, include=FALSE}
+
+```
+
+## Ecommerce Analysis
+
+This document is formatted into labeled code chunks to minimize additional comments.
+
+The data is read in, inspected, and sanitized. 
+Next, two XLSX files are created from the data using the openxlsx package in combination
+with tidyverse piping to engineer the new columns.
+
+
+```{r load data}
+adds_to_cart = read.csv("data/DataAnalyst_Ecom_data_addsToCart.csv")
+session_counts = read.csv("data/DataAnalyst_Ecom_data_sessionCounts.csv")
+```
+
+```{r data exploration}
+#manually inspect the data
+View(adds_to_cart)
+summary(adds_to_cart)
+skimr::skim(adds_to_cart)
+
+dup_rows <- adds_to_cart[duplicated(adds_to_cart), ]
+dup_rows
+
+na_rows <- adds_to_cart[is.na(adds_to_cart), ]
+na_rows
+
+View(session_counts)
+summary(session_counts)
+dup_rows_2 <- session_counts[duplicated(session_counts), ]
+dup_rows_2
+
+na_rows_2 <- session_counts[is.na(session_counts), ]
+na_rows_2
+```
+
+```{r data sanitization}
+session_counts <- session_counts %>%
+  # Replace missing values with 0 for numerical columns
+  # use a check for numeric columns, then use lambda function to check for missing values
+  mutate_if(is.numeric, ~if_else(is.na(.), 0, .)) %>%
+  # Remove duplicates
+  distinct() %>%
+  # Convert dim_date column to Date format (lubridate)
+  mutate(dim_date = mdy(dim_date)) %>%
+  # Create new columns for month, day, and year (lubridate)
+  mutate(month = month(dim_date),
+         day = day(dim_date),
+         year = year(dim_date)) %>%
+  rename("device_category" = "dim_deviceCategory") %>%
+  rename("date" = "dim_date") %>%
+  rename("browser" = "dim_browser") %>%
+  # Remove rows where browser is "error" or "(not set)" or obviously not a normal browser
+  filter(!(browser %in% c("error", "(not set)", "MRCHROME", "DESKTOP")))
+  # filter(browser %in% c("Safari", "Chrome", "Internet Explorer", "Safari (in-app)", "Amazon Silk", "Edge", "Android Webview"))  # could consider filtering by naming all the desired browsers, or taking top visits
+
+View(session_counts)
+```
+
+```{r month_by_device}
+# Group by year, then month, then device category 
+month_by_device <- session_counts %>%
+  #could group by browser here for more granularity
+  group_by(year, month, device_category) %>%
+  summarise(Sessions = sum(sessions),
+            Transactions = sum(transactions),
+            QTY = sum(QTY))
+            # decided not to include browser, date, device granularity for ease of readability.
+            # ,Browser = dim_browser
+            # ,date = date)
+# Calculate ECR
+month_by_device <- month_by_device %>%
+  mutate(ECR = Transactions / Sessions)
+
+month_by_device <- month_by_device %>%
+  mutate(year_month = paste(year, month, "01", sep = "-")) %>%
+  mutate(year_month = ymd(year_month)) %>%
+  arrange(year, month)
+
+View(month_by_device)
+```
+
+```{r latest_two_months}
+aggregated_data <- session_counts %>%
+  # could group by device or browser here for more granularity
+  group_by(year, month) %>%
+  summarise(Sessions = sum(sessions),
+            Transactions = sum(transactions),
+            QTY = sum(QTY))
+            # decided not to include browser, date, device granularity for ease of readability.
+            # ,Browser = dim_browser
+            # ,date = date)
+# Calculate ECR
+aggregated_data <- aggregated_data %>%
+  mutate(ECR = Transactions / Sessions)
+
+
+# left join adds_to_Cart with aggregated_data based on year and month
+merged_data <- left_join(aggregated_data, adds_to_cart, by = c("year" = "dim_year", "month" = "dim_month")) 
+
+#View(merged_data)
+
+# Add absolute and relative differences columns to the merged data
+merged_data <- merged_data %>%
+  arrange(year, month) %>%
+  mutate(
+    Sessions_diff = Sessions - lag(Sessions),
+    Transactions_diff = Transactions - lag(Transactions),
+    QTY_diff = QTY - lag(QTY),
+    AddsToCart_diff = addsToCart - lag(addsToCart),
+    Sessions_diff_abs = abs(Sessions_diff),
+    Transactions_diff_abs = abs(Transactions_diff),
+    QTY_diff_abs = abs(QTY_diff),
+    AddsToCart_diff_abs = abs(AddsToCart_diff),
+    Sessions_diff_rel = Sessions_diff / lag(Sessions),
+    Transactions_diff_rel = Transactions_diff / lag(Transactions),
+    QTY_diff_rel = QTY_diff / lag(QTY),
+    AddsToCart_diff_rel = AddsToCart_diff / lag(addsToCart)
+  )
+View(merged_data)
+
+# create a year_month column
+merged_data <- merged_data %>%
+  mutate(year_month = paste(year, month, "01", sep = "-")) %>%
+  mutate(year_month = ymd(year_month)) %>%
+  arrange(year, month)
+
+# Select the latest two months
+latest_two_months <- merged_data %>%
+  tail(2) %>%
+  ungroup()
+
+View(latest_two_months)
+```
+
+
+
+
+```{r xlsx generation}
+wb <- createWorkbook()
+addWorksheet(wb, "MonthByDevice")
+addWorksheet(wb, "LatestTwoMonths")
+addWorksheet(wb, "MonthByMonth")
+
+writeData(wb, "MonthByDevice", month_by_device, startRow = 1, startCol = 1)
+writeData(wb, "LatestTwoMonths", latest_two_months, startRow = 1, startCol = 1)
+writeData(wb, "MonthByMonth", merged_data, startRow = 1, startCol = 1)
+
+saveWorkbook(wb, file = "deliverables/ecommerce_month_analysis.xlsx", overwrite = TRUE)
+```
+
+```{r visualizations}
+# i want to visualize the overall trends in sessions, transactions, QTY
+# look at comparative advantage of different devices - which device has highest conversion rate?
+
+# Plot the total number of transactions over time
+plot <- ggplot(merged_data, aes(x = year_month, y = Transactions)) +
+  geom_line() +
+  labs(x = "Date", y = "Transactions", title = "Transactions by Month") + 
+  theme_minimal()
+ggsave("TransactionsByMonth.png", plot)
+
+
+plot <- ggplot(merged_data, aes(x = year_month, y = QTY)) +
+  geom_line() +
+  labs(x = "Date", y = "Transactions", title = "QTY by Month")
+ggsave("QTYByMonth.png", plot)
+
+plot <- ggplot(merged_data, aes(x = year_month, y = Sessions)) +
+  geom_line() +
+  labs(x = "Date", y = "Transactions", title = "Sessions by Month")
+ggsave("SessionsByMonth.png", plot)
+
+# Calculate average ECR for each device type
+average_ecr <- month_by_device %>%
+  group_by(device_category) %>%
+  summarise(avg_ecr = mean(ECR, na.rm = TRUE))
+
+plot <- ggplot(average_ecr, aes(x = device_category, y = avg_ecr)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Average ECR by Device Type",
+       x = "Device Type",
+       y = "Average E-commerce Conversion Rate") +
+  theme_minimal() + 
+  theme(text = element_text(size = 18))
+ggsave("device_ECR.png", plot)
+
+# Calculate ECR for each browser
+session_counts <- session_counts %>%
+  mutate(ECR = transactions / sessions)
+
+browser_sessions <- session_counts %>%
+  group_by(browser) %>%
+  summarise(total_sessions = sum(sessions)) %>%
+  arrange(desc(total_sessions))
+
+# Select the top 4 browsers based on total sessions
+top_browsers <- browser_sessions %>%
+  slice(1:4) %>%
+  pull(browser)
+
+# Filter dataframe to include only the top 4 browsers
+session_counts_filtered <- session_counts %>%
+  filter(browser %in% top_browsers)
+
+View(session_counts_filtered)
+
+# Create a plot of average ECR for the top 4 browsers
+plot <- ggplot(session_counts_filtered, aes(x = browser, y = ECR)) +
+  geom_bar(stat = "summary", fun = "mean", fill = "skyblue", width = 0.5) +
+  labs(title = "Average ECR for Top 4 Browsers",
+       x = "Browser",
+       y = "Average E-commerce Conversion Rate") +
+  theme_minimal() +
+  theme(text = element_text(size = 18), axis.text.x = element_text(angle = 45, hjust = 1))
+ggsave("browser_ECR.png", plot)
+
+
+```
